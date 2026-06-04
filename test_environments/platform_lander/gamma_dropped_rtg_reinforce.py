@@ -28,8 +28,8 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
+from platform_lander import PlatformLander
 from vanilla_reinforce import (
-    PlatformLander,
     add_output_args,
     animate,
     log,

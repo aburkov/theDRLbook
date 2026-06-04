@@ -29,8 +29,8 @@ from torch import nn
 import torch.nn.functional as F
 
 from gamma_dropped_rtg_reinforce import Policy, rewards_to_go, trajectory_entropies
+from platform_lander import PlatformLander
 from vanilla_reinforce import (
-    PlatformLander,
     add_output_args,
     animate,
     log,

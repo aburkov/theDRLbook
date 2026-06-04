@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -31,14 +30,10 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
+from platform_lander import PlatformLander
+from platform_lander.platform_lander import BOOSTER_BOTTOM, BOOSTER_START_CLEARANCE, SCALE
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SRC = PROJECT_ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from platform_lander import PlatformLander
-from platform_lander.platform_lander import BOOSTER_BOTTOM, BOOSTER_START_CLEARANCE, SCALE  # noqa: E402
 
 
 RUNS_DIR = PROJECT_ROOT / "runs"
