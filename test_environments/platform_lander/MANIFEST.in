@@ -1,0 +1,12 @@
+include README.md
+include LICENSE
+recursive-include src/platform_lander *.py
+recursive-include tests *.py
+recursive-include examples *.py
+prune runs
+global-exclude __pycache__/*
+global-exclude *.py[cod]
+global-exclude .DS_Store
+global-exclude *.pt
+global-exclude *.csv
+global-exclude *.log

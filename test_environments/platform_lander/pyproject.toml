@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "platform_lander"
+version = "0.1.0"
+description = "Standalone reusable-booster landing environment for reinforcement learning."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Andriy Burkov" }]
+keywords = ["reinforcement-learning", "rl", "box2d", "lander", "environment"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.21",
+    "box2d-py>=2.3.5",
+    "pygame>=2.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+train = ["torch>=2"]
+
+[project.urls]
+Homepage = "https://github.com/aburkov/theDRLbook/tree/main/test_environments/platform_lander"
+Source = "https://github.com/aburkov/theDRLbook/tree/main/test_environments/platform_lander"
+Repository = "https://github.com/aburkov/theDRLbook"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+license-files = ["LICENSE"]
