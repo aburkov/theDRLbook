@@ -27,8 +27,9 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.distributions import Categorical
 
-from gamma_dropped_rtg_reinforce import Policy, rewards_to_go, trajectory_entropies
+from gamma_dropped_rtg_reinforce import Policy, rewards_to_go
 from platform_lander import PlatformLander
 from vanilla_reinforce import (
     add_output_args,
@@ -62,6 +63,14 @@ class ValueFunction(nn.Module):
 
     def forward(self, observation: torch.Tensor) -> torch.Tensor:
         return self.net(observation).squeeze(-1)
+
+
+def trajectory_entropies(policy: Policy, observations: list[torch.Tensor]) -> torch.Tensor:
+    """Return H(pi(. | o_t)) for each observation in one trajectory."""
+    observation_tensor = torch.stack(observations)
+    logits = policy(observation_tensor)
+    dist = Categorical(logits=logits)
+    return dist.entropy().reshape(-1)
 
 
 def parse_args() -> argparse.Namespace:

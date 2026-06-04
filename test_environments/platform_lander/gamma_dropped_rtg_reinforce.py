@@ -1,16 +1,14 @@
-"""REINFORCE with reward-to-go and an optional entropy bonus.
+"""REINFORCE with reward-to-go.
 
 Compared with ``vanilla_reinforce.py``, this keeps one trajectory per update
 and no baseline. This practical variant drops the outer ``gamma^t`` factor
 from the policy-gradient term while keeping discounted reward-to-go targets.
-An entropy bonus can be enabled with ``--entropy-coef`` to discourage premature
-policy collapse. The policy network uses the common OpenAI-Baselines/SB3-style
-initialization for on-policy RL: orthogonal hidden layers with gain sqrt(2),
-zero biases, and a small 0.01-gain policy-logit head so the initial categorical
-policy is close to uniform.
+The policy network uses the common OpenAI-Baselines/SB3-style initialization
+for on-policy RL: orthogonal hidden layers with gain sqrt(2), zero biases, and
+a small 0.01-gain policy-logit head so the initial categorical policy is close
+to uniform.
 
     loss = -sum_t G_t * log pi(a_t | o_t)
-           - entropy_coef * sum_t H(pi(. | o_t))
 
 where
 
@@ -26,7 +24,6 @@ from collections import deque
 import numpy as np
 import torch
 from torch import nn
-from torch.distributions import Categorical
 
 from platform_lander import PlatformLander
 from vanilla_reinforce import (
@@ -76,12 +73,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--learning-rate", type=float, default=1e-6)
-    parser.add_argument(
-        "--entropy-coef",
-        type=float,
-        default=0.0,
-        help="Coefficient for the policy entropy bonus. A value of 0 disables it.",
-    )
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--target-window", type=int, default=50)
@@ -103,14 +94,6 @@ def rewards_to_go(rewards: list[float], gamma: float) -> torch.Tensor:
 
     returns.reverse()
     return torch.as_tensor(returns, dtype=torch.float32)
-
-
-def trajectory_entropies(policy: Policy, observations: list[torch.Tensor]) -> torch.Tensor:
-    """Return H(pi(. | o_t)) for each observation in one trajectory."""
-    observation_tensor = torch.stack(observations)
-    logits = policy(observation_tensor)
-    dist = Categorical(logits=logits)
-    return dist.entropy().reshape(-1)
 
 
 def train(args: argparse.Namespace) -> Policy:
@@ -145,7 +128,6 @@ def train(args: argparse.Namespace) -> Policy:
         log(
             f"training_start script=gamma_dropped_rtg_reinforce "
             f"episodes={args.episodes} max_steps={args.max_steps} seed={args.seed} "
-            f"entropy_coef={args.entropy_coef} "
             f"model_file={resolve_project_path(args.model_file)}",
             log_file,
         )
@@ -162,22 +144,16 @@ def train(args: argparse.Namespace) -> Policy:
 
             rtg = rewards_to_go(rewards, args.gamma)
             log_prob_tensor = torch.stack(log_probs).reshape(-1)
-            entropy_tensor = trajectory_entropies(policy, observations)
 
             rtg = rtg.to(
                 device=log_prob_tensor.device,
                 dtype=log_prob_tensor.dtype,
             )
-            entropy_tensor = entropy_tensor.to(
-                device=log_prob_tensor.device,
-                dtype=log_prob_tensor.dtype,
-            )
 
-            assert log_prob_tensor.shape == rtg.shape == entropy_tensor.shape
+            assert log_prob_tensor.shape == rtg.shape
 
             policy_loss = -(log_prob_tensor * rtg).sum()
-            entropy_bonus = entropy_tensor.sum()
-            loss = policy_loss - args.entropy_coef * entropy_bonus
+            loss = policy_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -197,8 +173,6 @@ def train(args: argparse.Namespace) -> Policy:
                     "return": episode_return,
                     "average_return": average_return,
                     "policy_loss": float(policy_loss.detach().item()),
-                    "entropy_bonus": float(entropy_bonus.detach().item()),
-                    "average_entropy": float(entropy_tensor.detach().mean().item()),
                     "loss": float(loss.detach().item()),
                     "success_count": success_count,
                     "success_rate": success_count / len(recent_successes),
@@ -215,7 +189,6 @@ def train(args: argparse.Namespace) -> Policy:
                     f"episode={episode:5d} "
                     f"return={episode_return:8.2f} "
                     f"avg{len(recent_returns):02d}={average_return:8.2f} "
-                    f"entropy={float(entropy_tensor.detach().mean().item()):5.3f} "
                     f"success{len(recent_successes):02d}={success_count:2d} "
                     f"fires={info.get('jet_fires_used', 0):3d} "
                     f"avgfires{len(recent_jet_fires):02d}={average_jet_fires:6.1f} "
