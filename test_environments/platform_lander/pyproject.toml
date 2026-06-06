@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0,<77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "platform_lander"
-version = "0.1.0"
+version = "0.1.11"
 description = "Standalone reusable-booster landing environment for reinforcement learning."
 readme = "README.md"
 requires-python = ">=3.10"

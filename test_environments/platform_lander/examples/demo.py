@@ -10,16 +10,8 @@ The tests are intentionally headless; this script is for visual inspection.
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC = PROJECT_ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from platform_lander import PlatformLander, heuristic  # noqa: E402
+from platform_lander import DEFAULT_WIND_POWER, PlatformLander, heuristic
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--wind", action="store_true", help="Enable wind during the demo.")
-    parser.add_argument("--wind-power", type=float, default=5.0)
+    parser.add_argument("--wind-power", type=float, default=DEFAULT_WIND_POWER)
     return parser.parse_args()
 
 
@@ -67,4 +59,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

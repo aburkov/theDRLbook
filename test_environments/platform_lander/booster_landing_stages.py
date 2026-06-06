@@ -10,19 +10,14 @@ three-panel image in the same directory.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SRC = PROJECT_ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from platform_lander import PlatformLander  # noqa: E402
-from platform_lander.platform_lander import BOOSTER_BOTTOM, SCALE  # noqa: E402
+from platform_lander import PlatformLander
+from platform_lander.platform_lander import BOOSTER_BOTTOM, SCALE
 
 
 OUT_DIR = PROJECT_ROOT

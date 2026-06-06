@@ -9,7 +9,13 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
-from vanilla_reinforce import PROJECT_ROOT, RUNS_DIR, animate, load_policy
+from vanilla_reinforce import (
+    DEFAULT_WIND_POWER,
+    PROJECT_ROOT,
+    RUNS_DIR,
+    animate,
+    load_policy,
+)
 
 
 MODEL_FILE = RUNS_DIR / "full_reinforce.pt"
@@ -37,7 +43,7 @@ def main() -> None:
         gamma=float(training_args.get("gamma", DEFAULT_GAMMA)),
         max_steps=int(training_args.get("max_steps", DEFAULT_MAX_STEPS)),
         wind=bool(training_args.get("wind", False)),
-        wind_power=float(training_args.get("wind_power", 5.0)),
+        wind_power=float(training_args.get("wind_power", DEFAULT_WIND_POWER)),
         animation_runs=ANIMATION_RUNS,
     )
 

@@ -109,6 +109,12 @@ For a quick smoke test without opening the animation window:
 python vanilla_reinforce.py --episodes 3 --max-steps 20 --no-animation
 ```
 
+Training scripts also expose reward-scale controls for experiments:
+
+```bash
+python gamma_dropped_rtg_reinforce.py --success-reward 500 --failure-reward -500 --shaping-factor 0.5
+```
+
 ```python
 from platform_lander import PlatformLander
 
@@ -131,7 +137,12 @@ env.close()
 - Actions: `0` no-op, `1` upper-left attitude jet, `2` bottom engine, `3` upper-right attitude jet.
 - `continuous=True` uses a two-value `Box(-1, 1, shape=(2,))` action.
 - Wind is controlled with `enable_wind`, `wind_power`, `wind_direction`, and `set_wind(...)`.
-- The booster has 100 available jet fires by default. After they are exhausted,
+- The platform moves horizontally at `1.15 / 3.0` world units per second by default.
+- Episodes start with the platform at a random x/direction and the booster directly above it, tilted like `\` by 20 degrees with zero initial velocity.
+- Terminal rewards default to `success_reward=100.0` and `failure_reward=-100.0`.
+- Dense shaping is multiplied by `shaping_factor`, which defaults to `1.0`.
+- Dense shaping rewards lateral alignment, low relative horizontal speed, low vertical speed, vertical attitude, low angular velocity, and foot contact. It also rewards vertical closeness to the platform, but only while the booster's bottom is horizontally above the platform.
+- The booster has 50 available jet fires by default. After they are exhausted,
   engine commands have no effect and the booster continues ballistically.
 - The observation includes the fraction of jet fires remaining.
 - The package provides local `Box` and `Discrete` spaces and does not import Gymnasium.

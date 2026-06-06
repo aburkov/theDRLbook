@@ -1,0 +1,5 @@
+#!/bin/sh
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+remote=${GIT_AUTO_PUSH_REMOTE:-origin}
+echo "post-commit: pushing $branch to $remote"
+git push "$remote" "$branch"

@@ -45,20 +45,45 @@ INITIAL_RANDOM = 700.0
 
 BOOSTER_HALF_WIDTH = 8
 BOOSTER_TOP = 52
-BOOSTER_BOTTOM = 56
+BOOSTER_BOTTOM = 60
 BOOSTER_START_CLEARANCE = 0.06
+BOOSTER_START_MIN_ANGLE = 0.0
+BOOSTER_START_MAX_ANGLE = math.radians(45.0)
+BOOSTER_BODY_DENSITY = 4.055244755244756
 TOP_ENGINE_Y = 43
 TOP_ENGINE_AWAY = 9
 BOTTOM_ENGINE_Y = 54
+LANDING_LEG_TOP_X = 5
+LANDING_LEG_TOP_Y = 49
+LANDING_LEG_FOOT_X = 13
+LANDING_LEG_FOOT_Y = 60
+LANDING_LEG_WIDTH = 3
+LANDING_LEG_DENSITY = 6.0
+LANDING_FOOT_CONTACT_SLOP = 2.0 / SCALE
+CRASH_EFFECT_FRAMES = 36
 
 PLATFORM_WIDTH = 118
 PLATFORM_HEIGHT = 14
-PLATFORM_SPEED = 1.15
-MAX_JET_FIRES = 200
-LANDING_ANGLE = math.radians(8.0)
-LANDING_VX = 0.45
-LANDING_VY = 0.65
-LANDING_ANGULAR_V = 0.55
+PLATFORM_HALF_X = (PLATFORM_WIDTH / 2) / (VIEWPORT_W / 2)
+BOOSTER_BOTTOM_X_OFFSET = BOOSTER_BOTTOM / (VIEWPORT_W / 2)
+PLATFORM_SPEED = 1.15 / 3.0
+MAX_JET_FIRES = 50
+DEFAULT_WIND_POWER = 5.0
+DEFAULT_SUCCESS_REWARD = 100.0
+DEFAULT_FAILURE_REWARD = -100.0
+DEFAULT_SHAPING_FACTOR = 1.0
+STABLE_LANDING_STEPS = 20
+STABLE_LANDING_Y = 0.08
+STABLE_LANDING_VX = 0.80
+STABLE_LANDING_VY = 0.35
+STABLE_LANDING_ANGLE = math.radians(8.0)
+STABLE_LANDING_ANGULAR_V = 0.80
+
+
+def sample_booster_start_angle(rng) -> float:
+    angle = float(rng.uniform(BOOSTER_START_MIN_ANGLE, BOOSTER_START_MAX_ANGLE))
+    sign = float(rng.choice([-1.0, 1.0]))
+    return sign * angle
 
 
 class ContactDetector(contactListener):
@@ -84,24 +109,35 @@ class ContactDetector(contactListener):
         if "platform" not in labels:
             return
 
+        if labels.intersection(booster_labels) and not self.env.platform_contact:
+            booster_body = contact.fixtureA.body if a in booster_labels else contact.fixtureB.body
+            platform_body = contact.fixtureA.body if a == "platform" else contact.fixtureB.body
+            self.env.platform_impact_velocity = (
+                float(booster_body.linearVelocity.x - platform_body.linearVelocity.x),
+                float(booster_body.linearVelocity.y - platform_body.linearVelocity.y),
+                float(booster_body.angularVelocity),
+            )
+
         if "booster_body" in labels:
             self.env.body_platform_contact = True
             self.env.platform_contact = True
         if "left_foot" in labels:
             self.env.left_foot_contact = True
             self.env.platform_contact = True
+            self.env._queue_leg_anchor("left_foot", contact)
         if "right_foot" in labels:
             self.env.right_foot_contact = True
             self.env.platform_contact = True
+            self.env._queue_leg_anchor("right_foot", contact)
 
     def EndContact(self, contact) -> None:
         a, b = self._data(contact)
         labels = {a, b}
         if "platform" not in labels:
             return
-        if "left_foot" in labels:
+        if "left_foot" in labels and not self.env._is_leg_anchor_active_or_pending("left_foot"):
             self.env.left_foot_contact = False
-        if "right_foot" in labels:
+        if "right_foot" in labels and not self.env._is_leg_anchor_active_or_pending("right_foot"):
             self.env.right_foot_contact = False
         if "booster_body" in labels:
             self.env.body_platform_contact = False
@@ -110,6 +146,8 @@ class ContactDetector(contactListener):
             or self.env.right_foot_contact
             or self.env.body_platform_contact
         )
+        if not self.env.platform_contact:
+            self.env.platform_impact_velocity = None
 
 
 class PlatformLander(Env, EzPickle):
@@ -129,8 +167,9 @@ class PlatformLander(Env, EzPickle):
     relative x/y to the platform landing point, x/y velocity, booster angle,
     angular velocity, left/right foot contact flags, platform x, and platform
     velocity, and the fraction of jet fires remaining. Wind is applied from
-    ``wind_direction`` with force ``wind_power``. If ``variable_wind=True`` the
-    force varies over time using LunarLander v3's deterministic wind pattern.
+    ``wind_direction`` with horizontal force ``wind_power``. If
+    ``variable_wind=True`` the force varies over time using LunarLander v3's
+    deterministic wind pattern.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": FPS}
@@ -141,12 +180,14 @@ class PlatformLander(Env, EzPickle):
         continuous: bool = False,
         gravity: float = -10.0,
         enable_wind: bool = False,
-        wind_power: float = 15.0,
+        wind_power: float = DEFAULT_WIND_POWER,
         wind_direction: float | tuple[float, float] = 0.0,
-        turbulence_power: float = 1.5,
         variable_wind: bool = True,
         platform_speed: float = PLATFORM_SPEED,
         max_jet_fires: int = MAX_JET_FIRES,
+        success_reward: float = DEFAULT_SUCCESS_REWARD,
+        failure_reward: float = DEFAULT_FAILURE_REWARD,
+        shaping_factor: float = DEFAULT_SHAPING_FACTOR,
     ) -> None:
         EzPickle.__init__(
             self,
@@ -156,23 +197,31 @@ class PlatformLander(Env, EzPickle):
             enable_wind,
             wind_power,
             wind_direction,
-            turbulence_power,
             variable_wind,
             platform_speed,
             max_jet_fires,
+            success_reward,
+            failure_reward,
+            shaping_factor,
         )
         if not -12.0 < gravity < 0.0:
             raise ValueError(f"gravity must be between -12 and 0, got {gravity}")
+        if max_jet_fires < 1:
+            raise ValueError(f"max_jet_fires must be at least 1, got {max_jet_fires}")
+        if shaping_factor < 0.0:
+            raise ValueError(f"shaping_factor must be nonnegative, got {shaping_factor}")
 
         self.gravity = gravity
         self.continuous = continuous
         self.enable_wind = enable_wind
         self.wind_power = float(wind_power)
         self.wind_direction = wind_direction
-        self.turbulence_power = float(turbulence_power)
         self.variable_wind = variable_wind
         self.platform_speed = float(platform_speed)
         self.max_jet_fires = int(max_jet_fires)
+        self.success_reward = float(success_reward)
+        self.failure_reward = float(failure_reward)
+        self.shaping_factor = float(shaping_factor)
         self.render_mode = render_mode
 
         self.screen: pygame.Surface | None = None
@@ -186,7 +235,14 @@ class PlatformLander(Env, EzPickle):
         self.bottom_flame_power = 0.0
         self.top_flame_power = 0.0
         self.top_flame_direction = 0
+        self.crash_effect_position: tuple[float, float] | None = None
+        self.crash_effect_frame = 0
+        self.crash_effect_frames = 0
         self.jet_fires_used = 0
+        self.stable_landing_steps = 0
+        self.anchored_feet: set[str] = set()
+        self.pending_leg_anchor_points: dict[str, tuple[float, float]] = {}
+        self.leg_anchor_joints: dict[str, object] = {}
         self.prev_shaping = None
 
         low = np.array(
@@ -225,12 +281,20 @@ class PlatformLander(Env, EzPickle):
         self.body_platform_contact = False
         self.left_foot_contact = False
         self.right_foot_contact = False
+        self.platform_impact_velocity: tuple[float, float, float] | None = None
         self.failure_reason: str | None = None
         self.prev_shaping = None
         self.bottom_flame_power = 0.0
         self.top_flame_power = 0.0
         self.top_flame_direction = 0
+        self.crash_effect_position = None
+        self.crash_effect_frame = 0
+        self.crash_effect_frames = 0
         self.jet_fires_used = 0
+        self.stable_landing_steps = 0
+        self.anchored_feet = set()
+        self.pending_leg_anchor_points = {}
+        self.leg_anchor_joints = {}
 
         w = VIEWPORT_W / SCALE
         h = VIEWPORT_H / SCALE
@@ -267,9 +331,13 @@ class PlatformLander(Env, EzPickle):
         )
         ocean_fixture.userData = "ocean"
 
-        initial_x = w / 2
+        initial_x = platform_x
         initial_y = h + BOOSTER_BOTTOM / SCALE + BOOSTER_START_CLEARANCE
-        self.booster = self.world.CreateDynamicBody(position=(initial_x, initial_y), angle=0.0)
+        self.booster = self.world.CreateDynamicBody(
+            position=(initial_x, initial_y),
+            angle=sample_booster_start_angle(self.np_random),
+        )
+        self.booster.bullet = True
         body_fixture = self.booster.CreateFixture(
             fixtureDef(
                 shape=polygonShape(
@@ -282,7 +350,7 @@ class PlatformLander(Env, EzPickle):
                         (BOOSTER_HALF_WIDTH / SCALE, -48 / SCALE),
                     ]
                 ),
-                density=4.5,
+                density=BOOSTER_BODY_DENSITY,
                 friction=0.25,
                 categoryBits=0x0010,
                 maskBits=0x0001,
@@ -293,8 +361,15 @@ class PlatformLander(Env, EzPickle):
 
         left_foot_fixture = self.booster.CreateFixture(
             fixtureDef(
-                shape=polygonShape(box=(8 / SCALE, 2 / SCALE, (-7 / SCALE, -54 / SCALE), 0.0)),
-                density=0.7,
+                shape=polygonShape(
+                    vertices=[
+                        (-(LANDING_LEG_TOP_X + LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_TOP_Y / SCALE),
+                        (-(LANDING_LEG_TOP_X - LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_TOP_Y / SCALE),
+                        (-(LANDING_LEG_FOOT_X - LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_FOOT_Y / SCALE),
+                        (-(LANDING_LEG_FOOT_X + LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_FOOT_Y / SCALE),
+                    ]
+                ),
+                density=LANDING_LEG_DENSITY,
                 friction=1.0,
                 categoryBits=0x0010,
                 maskBits=0x0001,
@@ -305,8 +380,15 @@ class PlatformLander(Env, EzPickle):
 
         right_foot_fixture = self.booster.CreateFixture(
             fixtureDef(
-                shape=polygonShape(box=(8 / SCALE, 2 / SCALE, (7 / SCALE, -54 / SCALE), 0.0)),
-                density=0.7,
+                shape=polygonShape(
+                    vertices=[
+                        ((LANDING_LEG_TOP_X - LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_TOP_Y / SCALE),
+                        ((LANDING_LEG_TOP_X + LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_TOP_Y / SCALE),
+                        ((LANDING_LEG_FOOT_X + LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_FOOT_Y / SCALE),
+                        ((LANDING_LEG_FOOT_X - LANDING_LEG_WIDTH) / SCALE, -LANDING_LEG_FOOT_Y / SCALE),
+                    ]
+                ),
+                density=LANDING_LEG_DENSITY,
                 friction=1.0,
                 categoryBits=0x0010,
                 maskBits=0x0001,
@@ -317,31 +399,27 @@ class PlatformLander(Env, EzPickle):
 
         self.booster.color1 = (230, 232, 235)
         self.booster.color2 = (40, 44, 52)
-
-        self.booster.ApplyForceToCenter(
-            (
-                self.np_random.uniform(-INITIAL_RANDOM, INITIAL_RANDOM),
-                self.np_random.uniform(-INITIAL_RANDOM, INITIAL_RANDOM),
-            ),
-            True,
-        )
+        self.booster.linearVelocity = (0.0, 0.0)
+        self.booster.angularVelocity = 0.0
+        self.platform.linearVelocity = (self.platform_speed * self.platform_direction, 0.0)
 
         if self.enable_wind:
             self.wind_idx = int(self.np_random.integers(-9999, 9999))
-            self.torque_idx = int(self.np_random.integers(-9999, 9999))
 
         self.drawlist = [self.platform, self.booster]
 
         if self.render_mode == "human":
             self.render()
-        return self.step(np.array([0.0, 0.0], dtype=np.float32) if self.continuous else 0)[0], {}
+        return self._get_state(), {}
 
     def _wind_unit(self) -> tuple[float, float]:
         if isinstance(self.wind_direction, tuple):
-            x, y = self.wind_direction
-            norm = math.hypot(x, y)
-            return (0.0, 0.0) if norm == 0 else (x / norm, y / norm)
-        return math.cos(float(self.wind_direction)), math.sin(float(self.wind_direction))
+            x = float(self.wind_direction[0])
+        else:
+            x = math.cos(float(self.wind_direction))
+        if x == 0:
+            return 0.0, 0.0
+        return math.copysign(1.0, x), 0.0
 
     def _wind_scale(self) -> float:
         if not self.variable_wind:
@@ -397,13 +475,6 @@ class PlatformLander(Env, EzPickle):
         wind_mag = self.wind_power * self._wind_scale()
         self.booster.ApplyForceToCenter((wx * wind_mag, wy * wind_mag), True)
 
-        torque_mag = math.tanh(
-            math.sin(0.02 * self.torque_idx)
-            + math.sin(math.pi * 0.01 * self.torque_idx)
-        ) * self.turbulence_power
-        self.torque_idx += 1
-        self.booster.ApplyTorque(torque_mag, True)
-
     def _apply_engines(self, action) -> tuple[float, float]:
         assert self.booster is not None
 
@@ -438,9 +509,9 @@ class PlatformLander(Env, EzPickle):
             top_power = 1.0
 
         if top_direction and self.jet_fires_used < self.max_jet_fires:
-            # top_direction < 0 means upper-left jet, > 0 means upper-right jet.
+            # top_direction < 0 fires the upper-left jet; > 0 fires the upper-right jet.
             self.jet_fires_used += 1
-            local_side = TOP_ENGINE_AWAY / SCALE * (-top_direction)
+            local_side = TOP_ENGINE_AWAY / SCALE * top_direction
             impulse_sign = top_direction
             ox = tip[0] * (TOP_ENGINE_Y / SCALE + dispersion[0]) + side[0] * local_side
             oy = tip[1] * (TOP_ENGINE_Y / SCALE + dispersion[0]) + side[1] * local_side
@@ -494,17 +565,120 @@ class PlatformLander(Env, EzPickle):
     def _normalized_angle(angle: float) -> float:
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
-    def _is_standing_landing(self, state: np.ndarray) -> bool:
+    def _foot_anchor_world(self, foot_label: str) -> tuple[float, float]:
         assert self.booster is not None
-        return bool(
-            self.left_foot_contact
-            and self.right_foot_contact
-            and abs(state[0]) < (self.platform_half_width - 0.15) / (VIEWPORT_W / SCALE / 2)
-            and abs(state[2]) < LANDING_VX
-            and abs(state[3]) < LANDING_VY
-            and abs(state[4]) < LANDING_ANGLE
-            and abs(self.booster.angularVelocity) < LANDING_ANGULAR_V
+        foot_sign = -1.0 if foot_label == "left_foot" else 1.0
+        anchor = self.booster.GetWorldPoint(
+            (
+                foot_sign * LANDING_LEG_FOOT_X / SCALE,
+                -LANDING_LEG_FOOT_Y / SCALE,
+            )
         )
+        return float(anchor.x), float(anchor.y)
+
+    def _platform_top_y(self) -> float:
+        return float(self.platform_y + self.platform_half_height)
+
+    def _platform_surface_anchor(self, anchor: tuple[float, float]) -> tuple[float, float]:
+        return float(anchor[0]), self._platform_top_y()
+
+    def _lift_booster_until_foot_is_on_platform(self, foot_label: str) -> None:
+        assert self.booster is not None
+        _foot_x, foot_y = self._foot_anchor_world(foot_label)
+        top_y = self._platform_top_y()
+        if foot_y < top_y:
+            self.booster.position = (self.booster.position.x, self.booster.position.y + top_y - foot_y)
+
+    def _is_leg_anchor_active_or_pending(self, foot_label: str) -> bool:
+        return foot_label in self.anchored_feet or foot_label in self.pending_leg_anchor_points
+
+    def _foot_is_visually_touching_platform(self, foot_label: str) -> bool:
+        assert self.platform is not None
+        foot_x, foot_y = self._foot_anchor_world(foot_label)
+        platform_x = float(self.platform.position.x)
+        top_y = self._platform_top_y()
+        return bool(
+            platform_x - self.platform_half_width - LANDING_FOOT_CONTACT_SLOP
+            <= foot_x
+            <= platform_x + self.platform_half_width + LANDING_FOOT_CONTACT_SLOP
+            and top_y - LANDING_FOOT_CONTACT_SLOP
+            <= foot_y
+            <= top_y + LANDING_FOOT_CONTACT_SLOP
+        )
+
+    def _queue_feet_visually_touching_platform(self) -> None:
+        if self.booster is None or self.platform is None:
+            return
+        for foot_label in ("left_foot", "right_foot"):
+            if self._is_leg_anchor_active_or_pending(foot_label):
+                continue
+            if self._foot_is_visually_touching_platform(foot_label):
+                self._queue_leg_anchor(foot_label)
+
+    def _queue_leg_anchor(self, foot_label: str, contact=None) -> None:
+        if foot_label in self.anchored_feet:
+            return
+        point: tuple[float, float] | None = None
+        if contact is not None:
+            try:
+                world_manifold = contact.worldManifold
+                if world_manifold.points:
+                    contact_point = world_manifold.points[0]
+                    point = (float(contact_point[0]), float(contact_point[1]))
+            except Exception:
+                point = None
+        self.pending_leg_anchor_points[foot_label] = self._platform_surface_anchor(point or self._foot_anchor_world(foot_label))
+
+    def _process_pending_leg_anchors(self) -> None:
+        if self.booster is None or self.platform is None:
+            self.pending_leg_anchor_points.clear()
+            return
+        for foot_label, anchor in list(self.pending_leg_anchor_points.items()):
+            if foot_label in self.anchored_feet:
+                continue
+            self._lift_booster_until_foot_is_on_platform(foot_label)
+            joint = self.world.CreateRevoluteJoint(
+                bodyA=self.platform,
+                bodyB=self.booster,
+                anchor=anchor,
+                collideConnected=True,
+            )
+            self.leg_anchor_joints[foot_label] = joint
+            self.anchored_feet.add(foot_label)
+            if foot_label == "left_foot":
+                self.left_foot_contact = True
+            else:
+                self.right_foot_contact = True
+            self.platform_contact = True
+        self.pending_leg_anchor_points.clear()
+
+    def _is_settled_on_platform(self) -> bool:
+        return bool(self.left_foot_contact and self.right_foot_contact and self.platform_contact)
+
+    def _is_stable_platform_landing(self, state: np.ndarray) -> bool:
+        assert self.booster is not None
+        assert self.platform is not None
+
+        bottom_x = state[0] - math.sin(float(state[4])) * BOOSTER_BOTTOM_X_OFFSET
+        rel_vx = float(self.booster.linearVelocity.x - self.platform.linearVelocity.x)
+        vy = float(self.booster.linearVelocity.y)
+        angular_v = float(self.booster.angularVelocity)
+        return bool(
+            self._is_settled_on_platform()
+            and not self.body_platform_contact
+            and abs(bottom_x) <= PLATFORM_HALF_X
+            and abs(state[1]) <= STABLE_LANDING_Y
+            and abs(rel_vx) <= STABLE_LANDING_VX
+            and abs(vy) <= STABLE_LANDING_VY
+            and abs(state[4]) <= STABLE_LANDING_ANGLE
+            and abs(angular_v) <= STABLE_LANDING_ANGULAR_V
+        )
+
+    def _update_landing_stability(self, state: np.ndarray) -> None:
+        if self._is_stable_platform_landing(state):
+            self.stable_landing_steps += 1
+        else:
+            self.stable_landing_steps = 0
 
     def _terminal_status(self, state: np.ndarray) -> tuple[bool, bool, str | None]:
         assert self.booster is not None
@@ -514,12 +688,14 @@ class PlatformLander(Env, EzPickle):
             return True, False, "out_of_bounds"
         if self.body_platform_contact:
             return True, False, "booster_body_hit_platform"
-        if self.platform_contact and abs(state[4]) >= LANDING_ANGLE:
-            return True, False, "non_vertical_platform_contact"
-        if self._is_standing_landing(state) and (not self.booster.awake or abs(state[3]) < 0.08):
+        if len(self.anchored_feet) >= 2:
+            return True, True, None
+        if self.stable_landing_steps >= STABLE_LANDING_STEPS:
             return True, True, None
         if not self.booster.awake:
-            return True, False, "settled_not_vertical"
+            if self._is_settled_on_platform():
+                return True, True, None
+            return True, False, "settled_not_on_platform"
         return False, False, None
 
     def _settle_successful_landing(self) -> None:
@@ -540,51 +716,97 @@ class PlatformLander(Env, EzPickle):
         self.body_platform_contact = False
         self.platform_contact = True
 
+    def _start_crash_effect(self, failure_reason: str | None) -> None:
+        if self.booster is None:
+            return
+        x = float(self.booster.position.x)
+        y = float(self.booster.position.y)
+        if failure_reason in {"ocean", "booster_body_hit_platform"}:
+            y = max(y, float(getattr(self, "ocean_y", 0.0)))
+        self.crash_effect_position = (x, y)
+        self.crash_effect_frame = 0
+        self.crash_effect_frames = CRASH_EFFECT_FRAMES
+
+    @staticmethod
+    def _dense_shaping(state: np.ndarray) -> float:
+        bottom_x = state[0] - math.sin(float(state[4])) * BOOSTER_BOTTOM_X_OFFSET
+        vertical_position_penalty = 100 * abs(state[1]) if abs(bottom_x) <= PLATFORM_HALF_X else 0.0
+        return float(
+            -100 * abs(state[0])
+            - vertical_position_penalty
+            - 100 * abs(state[2])
+            - 100 * abs(state[3])
+            - 120 * abs(state[4])
+            - 80 * abs(state[5])
+            + 12 * state[6]
+            + 12 * state[7]
+        )
+
+    def _step_info(self, success: bool, failure_reason: str | None) -> dict:
+        return {
+            "success": success,
+            "failure_reason": failure_reason,
+            "platform_x": float(self.platform.position.x) if self.platform else None,
+            "platform_impact_velocity": self.platform_impact_velocity,
+            "wind_power": self.wind_power if self.enable_wind else 0.0,
+            "wind_direction": self.wind_direction,
+            "jet_fires_used": self.jet_fires_used,
+            "jet_fires_remaining": max(0, self.max_jet_fires - self.jet_fires_used),
+            "stable_landing_steps": self.stable_landing_steps,
+            "anchored_feet": tuple(sorted(self.anchored_feet)),
+            "left_foot_contact": self.left_foot_contact,
+            "right_foot_contact": self.right_foot_contact,
+            "body_platform_contact": self.body_platform_contact,
+            "platform_contact": self.platform_contact,
+        }
+
+    def _terminal_step_result(self, state: np.ndarray, success: bool, failure_reason: str | None):
+        self.failure_reason = failure_reason
+        reward = self.success_reward if success else self.failure_reward
+        if success:
+            self._settle_successful_landing()
+            state = self._get_state()
+        else:
+            self._start_crash_effect(failure_reason)
+        if self.render_mode == "human":
+            self.render()
+        return state, reward, True, False, self._step_info(success, failure_reason)
+
     def step(self, action):
         if self.booster is None:
             raise AssertionError("You forgot to call reset()")
+
+        state = self._get_state()
+        terminated, success, failure_reason = self._terminal_status(state)
+        if terminated:
+            return self._terminal_step_result(state, success, failure_reason)
 
         self._update_platform()
         self._apply_wind()
         bottom_power, top_power = self._apply_engines(action)
 
         self.world.Step(1.0 / FPS, 6 * 30, 2 * 30)
+        self._queue_feet_visually_touching_platform()
+        self._process_pending_leg_anchors()
         self._clamp_platform()
 
         state = self._get_state()
-        shaping = (
-            -100 * math.sqrt(state[0] * state[0] + state[1] * state[1])
-            -100 * math.sqrt(state[2] * state[2] + state[3] * state[3])
-            -120 * abs(state[4])
-            + 12 * state[6]
-            + 12 * state[7]
-        )
-        reward = 0.0 if self.prev_shaping is None else float(shaping - self.prev_shaping)
+        shaping = self._dense_shaping(state)
+        reward = 0.0 if self.prev_shaping is None else float(self.shaping_factor * (shaping - self.prev_shaping))
         self.prev_shaping = shaping
         reward -= bottom_power * 0.30
         reward -= top_power * 0.03
 
+        self._update_landing_stability(state)
         terminated, success, failure_reason = self._terminal_status(state)
-        self.failure_reason = failure_reason
         if terminated:
-            reward = 100.0 if success else -100.0
-            if success:
-                self._settle_successful_landing()
-                state = self._get_state()
+            return self._terminal_step_result(state, success, failure_reason)
+        self.failure_reason = failure_reason
 
         if self.render_mode == "human":
             self.render()
 
-        info = {
-            "success": success,
-            "failure_reason": failure_reason,
-            "platform_x": float(self.platform.position.x) if self.platform else None,
-            "wind_power": self.wind_power if self.enable_wind else 0.0,
-            "wind_direction": self.wind_direction,
-            "jet_fires_used": self.jet_fires_used,
-            "jet_fires_remaining": max(0, self.max_jet_fires - self.jet_fires_used),
-        }
-        return state, reward, terminated, False, info
+        return state, reward, terminated, False, self._step_info(success, failure_reason)
 
     def render(self):
         if self.render_mode is None:
@@ -642,6 +864,7 @@ class PlatformLander(Env, EzPickle):
                 pygame.draw.aalines(surf, outline, True, path)
 
         self._draw_booster_details(surf, pygame)
+        self._draw_crash_effect(surf, pygame, gfxdraw)
         surf = pygame.transform.flip(surf, False, True)
 
         if self.render_mode == "human":
@@ -679,11 +902,11 @@ class PlatformLander(Env, EzPickle):
             )
 
         if self.top_flame_power > 0.03 and self.top_flame_direction:
-            local_x = TOP_ENGINE_AWAY / SCALE * (-self.top_flame_direction)
+            local_x = TOP_ENGINE_AWAY / SCALE * self.top_flame_direction
             nozzle, direction = self._local_flame_anchor(
                 (local_x, TOP_ENGINE_Y / SCALE),
                 (
-                    local_x - self.top_flame_direction / SCALE,
+                    local_x + self.top_flame_direction / SCALE,
                     TOP_ENGINE_Y / SCALE,
                 ),
             )
@@ -700,6 +923,55 @@ class PlatformLander(Env, EzPickle):
             )
 
         surf.blit(layer, (0, 0))
+
+    def _draw_crash_effect(self, surf, pygame, gfxdraw) -> None:
+        if self.crash_effect_position is None or self.crash_effect_frame >= self.crash_effect_frames:
+            return
+
+        progress = self.crash_effect_frame / max(1, self.crash_effect_frames - 1)
+        fade = 1.0 - progress
+        center = (
+            int(round(self.crash_effect_position[0] * SCALE)),
+            int(round(self.crash_effect_position[1] * SCALE)),
+        )
+        layer = pygame.Surface((VIEWPORT_W, VIEWPORT_H), pygame.SRCALPHA)
+
+        flash_radius = int(10 + 34 * progress)
+        shock_radius = int(18 + 60 * progress)
+        smoke_radius = int(16 + 46 * progress)
+        flash_alpha = int(230 * fade)
+        smoke_alpha = int(120 * fade)
+
+        if shock_radius > 2:
+            pygame.draw.circle(layer, (255, 238, 170, int(160 * fade)), center, shock_radius, width=3)
+            gfxdraw.aacircle(layer, center[0], center[1], shock_radius, (255, 238, 170, int(160 * fade)))
+
+        if smoke_radius > 2:
+            pygame.draw.circle(layer, (42, 45, 50, smoke_alpha), center, smoke_radius)
+            gfxdraw.aacircle(layer, center[0], center[1], smoke_radius, (42, 45, 50, smoke_alpha))
+
+        pygame.draw.circle(layer, (255, 116, 34, flash_alpha), center, flash_radius)
+        gfxdraw.aacircle(layer, center[0], center[1], flash_radius, (255, 116, 34, flash_alpha))
+        inner_radius = max(3, int(flash_radius * 0.45))
+        pygame.draw.circle(layer, (255, 236, 142, int(245 * fade)), center, inner_radius)
+
+        for i in range(14):
+            angle = i * (2 * math.pi / 14.0) + 0.35 * self.crash_effect_frame
+            distance = 16 + 86 * progress * (0.55 + 0.45 * ((i * 7) % 11) / 10.0)
+            start = np.array(center, dtype=np.float64)
+            end = start + np.array([math.cos(angle), math.sin(angle)]) * distance
+            spark_start = start + (end - start) * 0.55
+            color = (255, 186, 74, int(210 * fade))
+            pygame.draw.line(
+                layer,
+                color,
+                tuple(np.round(spark_start).astype(int)),
+                tuple(np.round(end).astype(int)),
+                width=2,
+            )
+
+        surf.blit(layer, (0, 0))
+        self.crash_effect_frame += 1
 
     def _local_flame_anchor(
         self,

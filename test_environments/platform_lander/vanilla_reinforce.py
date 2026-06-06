@@ -20,20 +20,33 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import time
 from collections import deque
 from pathlib import Path
 from typing import TextIO
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 import numpy as np
 import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from platform_lander import PlatformLander
-from platform_lander.platform_lander import BOOSTER_BOTTOM, BOOSTER_START_CLEARANCE, SCALE
-
-PROJECT_ROOT = Path(__file__).resolve().parent
+from platform_lander import (
+    DEFAULT_FAILURE_REWARD,
+    DEFAULT_SHAPING_FACTOR,
+    DEFAULT_SUCCESS_REWARD,
+    DEFAULT_WIND_POWER,
+    PlatformLander,
+)
+from platform_lander.platform_lander import (
+    BOOSTER_BOTTOM,
+    BOOSTER_START_CLEARANCE,
+    MAX_JET_FIRES,
+    SCALE,
+    sample_booster_start_angle,
+)
 
 
 RUNS_DIR = PROJECT_ROOT / "runs"
@@ -73,10 +86,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-window", type=int, default=50)
     parser.add_argument("--print-every", type=int, default=250)
     parser.add_argument("--wind", action="store_true")
-    parser.add_argument("--wind-power", type=float, default=5.0)
+    parser.add_argument("--wind-power", type=float, default=DEFAULT_WIND_POWER)
     parser.add_argument("--no-animation", action="store_true")
+    add_reward_args(parser)
     add_output_args(parser, "vanilla_reinforce")
     return parser.parse_args()
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0.0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return parsed
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def add_reward_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--success-reward",
+        type=float,
+        default=DEFAULT_SUCCESS_REWARD,
+        help="Terminal reward for a successful landing.",
+    )
+    parser.add_argument(
+        "--failure-reward",
+        type=float,
+        default=DEFAULT_FAILURE_REWARD,
+        help="Terminal reward for any failed episode.",
+    )
+    parser.add_argument(
+        "--shaping-factor",
+        type=nonnegative_float,
+        default=DEFAULT_SHAPING_FACTOR,
+        help="Nonnegative multiplier applied to the dense shaping reward.",
+    )
+    parser.add_argument(
+        "--max-jet-fires",
+        type=positive_int,
+        default=MAX_JET_FIRES,
+        help="Maximum number of total engine fires available in each episode.",
+    )
+
+
+def platform_lander_reward_kwargs(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        "success_reward": float(args.success_reward),
+        "failure_reward": float(args.failure_reward),
+        "shaping_factor": float(args.shaping_factor),
+        "max_jet_fires": int(args.max_jet_fires),
+    }
 
 
 def add_output_args(parser: argparse.ArgumentParser, run_name: str) -> None:
@@ -91,6 +155,12 @@ def add_output_args(parser: argparse.ArgumentParser, run_name: str) -> None:
         type=Path,
         default=RUNS_DIR / f"{run_name}.pt",
         help="Path to write the trained policy checkpoint.",
+    )
+    parser.add_argument(
+        "--best-model-file",
+        type=Path,
+        default=RUNS_DIR / f"{run_name}_best.pt",
+        help="Path to write the best policy checkpoint.",
     )
     parser.add_argument(
         "--csv-file",
@@ -175,12 +245,11 @@ def load_policy(model_file: Path) -> tuple[Policy, dict]:
 
 
 def randomize_start(env: PlatformLander, rng: np.random.Generator) -> np.ndarray:
-    """Randomize platform and booster start, then return the fresh observation."""
+    """Randomize the platform, then place the booster above it."""
 
     assert env.booster is not None
     assert env.platform is not None
 
-    w = 600 / 30.0
     h = 400 / 30.0
 
     env.platform.position = (
@@ -194,15 +263,12 @@ def randomize_start(env: PlatformLander, rng: np.random.Generator) -> np.ndarray
     )
 
     env.booster.position = (
-        float(rng.uniform(0.18 * w, 0.82 * w)),
-        float(h + BOOSTER_BOTTOM / SCALE + rng.uniform(BOOSTER_START_CLEARANCE, 0.18)),
+        float(env.platform.position.x),
+        float(h + BOOSTER_BOTTOM / SCALE + BOOSTER_START_CLEARANCE),
     )
-    env.booster.angle = float(rng.uniform(-0.45, 0.45))
-    env.booster.linearVelocity = (
-        float(rng.uniform(-1.0, 1.0)),
-        float(rng.uniform(-0.6, 0.4)),
-    )
-    env.booster.angularVelocity = float(rng.uniform(-0.6, 0.6))
+    env.booster.angle = sample_booster_start_angle(rng)
+    env.booster.linearVelocity = (0.0, 0.0)
+    env.booster.angularVelocity = 0.0
     env.booster.awake = True
 
     env.ocean_contact = False
@@ -263,6 +329,7 @@ def run_episode_data(
     observations: list[torch.Tensor] = []
     log_probs: list[torch.Tensor] = []
     rewards: list[float] = []
+    entropies: list[float] = []
     info: dict = {}
 
     for step in range(max_steps):
@@ -278,12 +345,28 @@ def run_episode_data(
 
         action = int(action_tensor.item())
         log_probs.append(dist.log_prob(action_tensor))
+        entropies.append(float(dist.entropy().detach().item()))
 
         observation, reward, terminated, truncated, info = env.step(action)
         rewards.append(float(reward))
 
         if terminated or truncated:
             break
+
+    if not terminated and not truncated:
+        rewards[-1] = float(env.failure_reward)
+        info = {
+            **info,
+            "success": False,
+            "failure_reason": "timeout",
+        }
+
+    average_entropy = float(np.mean(entropies)) if entropies else 0.0
+    info = {
+        **info,
+        "policy_entropy": average_entropy,
+        "policy_perplexity": float(math.exp(average_entropy)),
+    }
 
     episode_return = discounted_return(rewards, gamma)
     return observations, log_probs, rewards, episode_return, step + 1, info
@@ -297,6 +380,7 @@ def train(args: argparse.Namespace) -> Policy:
         enable_wind=args.wind,
         wind_power=args.wind_power,
         wind_direction=(1.0, 0.0),
+        **platform_lander_reward_kwargs(args),
     )
     policy = Policy(
         obs_dim=int(env.observation_space.shape[0]),
@@ -394,6 +478,7 @@ def animate(policy: Policy, args: argparse.Namespace) -> None:
         enable_wind=args.wind,
         wind_power=args.wind_power,
         wind_direction=(1.0, 0.0),
+        **platform_lander_reward_kwargs(args),
     )
 
     try:

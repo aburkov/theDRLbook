@@ -31,11 +31,14 @@ from torch import nn
 from torch.distributions import Categorical
 
 from vanilla_reinforce import (
+    DEFAULT_WIND_POWER,
     PlatformLander,
     add_output_args,
+    add_reward_args,
     animate,
     log,
     open_log,
+    platform_lander_reward_kwargs,
     resolve_project_path,
     run_episode_data,
     save_policy,
@@ -97,8 +100,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-window", type=int, default=50)
     parser.add_argument("--print-every", type=int, default=250)
     parser.add_argument("--wind", action="store_true")
-    parser.add_argument("--wind-power", type=float, default=5.0)
+    parser.add_argument("--wind-power", type=float, default=DEFAULT_WIND_POWER)
     parser.add_argument("--no-animation", action="store_true")
+    add_reward_args(parser)
     add_output_args(parser, "batch_rtg_reinforce")
     return parser.parse_args()
 
@@ -182,6 +186,7 @@ def train(args: argparse.Namespace) -> Policy:
         enable_wind=args.wind,
         wind_power=args.wind_power,
         wind_direction=(1.0, 0.0),
+        **platform_lander_reward_kwargs(args),
     )
 
     policy = Policy(

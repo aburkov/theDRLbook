@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,16 +31,27 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from gamma_dropped_rtg_reinforce import Policy, rewards_to_go
-from platform_lander import PlatformLander
+from platform_lander import DEFAULT_WIND_POWER, PlatformLander
 from vanilla_reinforce import (
     add_output_args,
+    add_reward_args,
     animate,
     log,
     open_log,
+    platform_lander_reward_kwargs,
     resolve_project_path,
     run_episode_data,
     save_training_csv,
 )
+
+
+@dataclass(frozen=True)
+class TrainingResult:
+    seed: int
+    policy: Policy
+    final_row: dict[str, object]
+    model_path: Path
+    csv_path: Path
 
 
 class ValueFunction(nn.Module):
@@ -88,12 +100,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--value-hidden-dim", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, nargs="+", default=[0])
     parser.add_argument("--target-window", type=int, default=50)
     parser.add_argument("--print-every", type=int, default=250)
     parser.add_argument("--wind", action="store_true")
-    parser.add_argument("--wind-power", type=float, default=5.0)
+    parser.add_argument("--wind-power", type=float, default=DEFAULT_WIND_POWER)
     parser.add_argument("--no-animation", action="store_true")
+    add_reward_args(parser)
     add_output_args(parser, "gamma_dropped_value_function_baseline_reinforce")
     return parser.parse_args()
 
@@ -214,7 +227,21 @@ def save_policy_and_value(
     return path
 
 
-def train(args: argparse.Namespace) -> Policy:
+def with_seed_suffix(path: Path, seed: int) -> Path:
+    return path.with_name(f"{path.stem}_seed{seed}{path.suffix}")
+
+
+def args_for_seed(args: argparse.Namespace, seed: int, *, multi_seed: bool) -> argparse.Namespace:
+    seed_args = argparse.Namespace(**vars(args))
+    seed_args.seed = int(seed)
+    if multi_seed:
+        seed_args.log_file = with_seed_suffix(args.log_file, seed)
+        seed_args.model_file = with_seed_suffix(args.model_file, seed)
+        seed_args.csv_file = with_seed_suffix(args.csv_file, seed)
+    return seed_args
+
+
+def train(args: argparse.Namespace) -> TrainingResult:
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
@@ -222,6 +249,7 @@ def train(args: argparse.Namespace) -> Policy:
         enable_wind=args.wind,
         wind_power=args.wind_power,
         wind_direction=(1.0, 0.0),
+        **platform_lander_reward_kwargs(args),
     )
     policy = Policy(
         obs_dim=int(env.observation_space.shape[0]),
@@ -344,14 +372,92 @@ def train(args: argparse.Namespace) -> Policy:
         env.close()
         log_file.close()
 
-    return policy
+    return TrainingResult(
+        seed=int(args.seed),
+        policy=policy,
+        final_row=training_rows[-1],
+        model_path=model_path,
+        csv_path=csv_path,
+    )
+
+
+def report_multi_seed_results(results: list[TrainingResult], target_window: int) -> None:
+    final_avg_returns = np.asarray(
+        [float(result.final_row["average_return"]) for result in results],
+        dtype=np.float64,
+    )
+    final_success_rates = np.asarray(
+        [float(result.final_row["success_rate"]) for result in results],
+        dtype=np.float64,
+    )
+    final_returns = np.asarray(
+        [float(result.final_row["return"]) for result in results],
+        dtype=np.float64,
+    )
+    final_avg_jet_fires = np.asarray(
+        [float(result.final_row["average_jet_fires"]) for result in results],
+        dtype=np.float64,
+    )
+    final_avg_value_losses = np.asarray(
+        [float(result.final_row["average_value_loss"]) for result in results],
+        dtype=np.float64,
+    )
+
+    print("")
+    print("multi_seed_report script=gamma_dropped_value_function_baseline_reinforce")
+    print(f"seeds={','.join(str(result.seed) for result in results)}")
+    print(f"runs={len(results)}")
+    print(
+        f"final_avg{target_window}_mean={final_avg_returns.mean():.2f} "
+        f"std={final_avg_returns.std(ddof=0):.2f} "
+        f"min={final_avg_returns.min():.2f} "
+        f"max={final_avg_returns.max():.2f}"
+    )
+    print(
+        f"final_success_rate_mean={final_success_rates.mean():.3f} "
+        f"std={final_success_rates.std(ddof=0):.3f}"
+    )
+    print(
+        f"final_return_mean={final_returns.mean():.2f} "
+        f"std={final_returns.std(ddof=0):.2f}"
+    )
+    print(
+        f"final_avg_jet_fires_mean={final_avg_jet_fires.mean():.1f} "
+        f"std={final_avg_jet_fires.std(ddof=0):.1f}"
+    )
+    print(
+        f"final_avg_value_loss_mean={final_avg_value_losses.mean():.2f} "
+        f"std={final_avg_value_losses.std(ddof=0):.2f}"
+    )
+    for result in results:
+        row = result.final_row
+        print(
+            f"seed={result.seed} "
+            f"final_avg{target_window}={float(row['average_return']):.2f} "
+            f"final_success_rate={float(row['success_rate']):.3f} "
+            f"final_return={float(row['return']):.2f} "
+            f"final_avgfires{target_window}={float(row['average_jet_fires']):.1f} "
+            f"final_avg_vloss{target_window}={float(row['average_value_loss']):.2f} "
+            f"model_file={result.model_path} "
+            f"csv_file={result.csv_path}"
+        )
 
 
 def main() -> None:
     args = parse_args()
-    policy = train(args)
+    seeds = [int(seed) for seed in args.seed]
+    multi_seed = len(seeds) > 1
+    results: list[TrainingResult] = []
+
+    for seed in seeds:
+        result = train(args_for_seed(args, seed, multi_seed=multi_seed))
+        results.append(result)
+
+    if multi_seed:
+        report_multi_seed_results(results, args.target_window)
+
     if not args.no_animation:
-        animate(policy, args)
+        animate(results[-1].policy, args_for_seed(args, results[-1].seed, multi_seed=multi_seed))
 
 
 if __name__ == "__main__":
